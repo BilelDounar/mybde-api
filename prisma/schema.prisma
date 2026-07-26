@@ -1,0 +1,264 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ─────────────────────────────────────────────────
+
+enum Role {
+  STUDENT
+  ADMIN_BDE
+  SUPER_ADMIN
+}
+
+enum BdeStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+enum EventCategory {
+  RENCONTRE
+  ATELIER
+  CONFERENCE
+  SOIREE
+  VOYAGE
+  SPORT
+  SOLIDAIRE
+  AUTRE
+}
+
+enum TicketStatus {
+  VALID
+  USED
+  CANCELLED
+  REFUNDED
+}
+
+enum OrderStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PrivacyLevel {
+  PUBLIC
+  PRIVATE
+}
+
+enum Theme {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+// ─── Models ────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  passwordHash   String
+  displayName    String
+  profilePicture String?
+  phone          String?
+  bio            String?
+  role           Role     @default(STUDENT)
+  bdeCredits     Float    @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Academic info
+  university String?
+  program    String?
+  year       Int?
+
+  // Preferences
+  notificationsEnabled Boolean      @default(true)
+  emailNotifications   Boolean      @default(true)
+  privacyLevel         PrivacyLevel @default(PUBLIC)
+  theme                Theme        @default(LIGHT)
+  language             String       @default("fr")
+
+  // Relations
+  bdeMembers          BdeMember[]
+  tickets             Ticket[]
+  orders              Order[]
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_reset_tokens")
+}
+
+model BDE {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  description String?
+  logo        String?
+  university  String
+  status      BdeStatus @default(ACTIVE)
+  balance     Float     @default(0)
+  // Code numérique à 6 chiffres partagé par les admins pour laisser un
+  // étudiant rejoindre le BDE sans connaître son identifiant interne.
+  joinCode    String    @unique
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  members     BdeMember[]
+  events      Event[]
+  withdrawals BdeWithdrawal[]
+
+  @@map("bde")
+}
+
+model BdeWithdrawal {
+  id            String   @id @default(cuid())
+  bdeId         String
+  requestedById String
+  amount        Float
+  fee           Float
+  netAmount     Float
+  createdAt     DateTime @default(now())
+
+  bde BDE @relation(fields: [bdeId], references: [id], onDelete: Cascade)
+
+  @@map("bde_withdrawals")
+}
+
+model BdeMember {
+  id       String   @id @default(cuid())
+  userId   String
+  bdeId    String
+  isAdmin  Boolean  @default(false)
+  joinedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bde  BDE  @relation(fields: [bdeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, bdeId])
+  @@map("bde_members")
+}
+
+model Event {
+  id               String        @id @default(cuid())
+  bdeId            String
+  title            String
+  description      String
+  image            String?
+  date             DateTime
+  startTime        String
+  endTime          String
+  location         String
+  latitude         Float?
+  longitude        Float?
+  capacity         Int
+  currentAttendees Int           @default(0)
+  status           EventStatus   @default(DRAFT)
+  category         EventCategory @default(AUTRE)
+  tags             String[]
+  // Prix minimum parmi les tarifs (EventTicketTier), recalculé côté service.
+  // Sert uniquement à l'affichage liste sans jointure.
+  price            Float         @default(0)
+  currency         String        @default("EUR")
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  // Relations
+  bde         BDE               @relation(fields: [bdeId], references: [id], onDelete: Cascade)
+  tickets     Ticket[]
+  orders      Order[]
+  ticketTiers EventTicketTier[]
+
+  @@map("events")
+}
+
+model EventTicketTier {
+  id        String   @id @default(cuid())
+  eventId   String
+  name      String
+  price     Float
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("event_ticket_tiers")
+}
+
+model Ticket {
+  id           String       @id @default(cuid())
+  userId       String
+  eventId      String
+  ticketNumber String       @unique
+  qrCode       String       @unique
+  status       TicketStatus @default(VALID)
+  price        Float
+  ticketType   String       @default("Standard")
+  seatInfo     String?
+  purchasedAt  DateTime     @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("tickets")
+}
+
+model Order {
+  id                    String      @id @default(cuid())
+  userId                String
+  eventId               String
+  totalAmount           Float
+  currency              String      @default("EUR")
+  quantity              Int         @default(1)
+  status                OrderStatus @default(PENDING)
+  stripePaymentIntentId String?
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("orders")
+}
+
+// NewsPost et PostLike sont gérés dans MongoDB (voir src/news/schemas/)
