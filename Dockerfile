@@ -8,6 +8,9 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 
+# Le moteur Prisma est lié à OpenSSL, absent de l'image Alpine de base.
+RUN apk add --no-cache openssl
+
 # Dépendances (avec devDependencies pour compiler et générer Prisma).
 # --include=dev est explicite : les plateformes de déploiement injectent
 # souvent NODE_ENV=production au build, ce qui ferait sauter @nestjs/cli.
@@ -25,8 +28,9 @@ FROM node:20-alpine AS production
 WORKDIR /app
 ENV NODE_ENV=production
 
-# curl est requis par le healthcheck de Coolify, exécuté dans le conteneur.
-RUN apk add --no-cache curl
+# openssl : requis par le moteur Prisma au démarrage.
+# curl : utilisé par le healthcheck exécuté dans le conteneur.
+RUN apk add --no-cache openssl curl
 
 # Dépendances de production uniquement
 COPY package*.json ./
