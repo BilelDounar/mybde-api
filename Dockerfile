@@ -25,6 +25,9 @@ FROM node:20-alpine AS production
 WORKDIR /app
 ENV NODE_ENV=production
 
+# curl est requis par le healthcheck de Coolify, exécuté dans le conteneur.
+RUN apk add --no-cache curl
+
 # Dépendances de production uniquement
 COPY package*.json ./
 RUN npm ci --omit=dev
