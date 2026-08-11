@@ -8,9 +8,11 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 
-# Dépendances (avec devDependencies pour compiler et générer Prisma)
+# Dépendances (avec devDependencies pour compiler et générer Prisma).
+# --include=dev est explicite : les plateformes de déploiement injectent
+# souvent NODE_ENV=production au build, ce qui ferait sauter @nestjs/cli.
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 # Client Prisma + compilation TypeScript
 COPY prisma ./prisma
