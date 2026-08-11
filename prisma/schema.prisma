@@ -1,5 +1,8 @@
 generator client {
   provider = "prisma-client-js"
+  // "native" pour le développement local, la cible musl pour l'image Alpine
+  // de production (Prisma ne détecte pas seul la variante OpenSSL 3 d'Alpine).
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {

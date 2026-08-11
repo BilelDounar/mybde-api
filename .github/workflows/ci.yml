@@ -1,0 +1,29 @@
+name: CI
+
+# Intégration continue de l'API (NestJS).
+# Le déploiement (CD) n'est pas géré ici : Coolify est connecté au dépôt GitHub
+# et redéploie automatiquement la dernière version de la branche main en production.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    name: Lint, tests et build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: Audit de sécurité des dépendances
+        run: npm audit --audit-level=high || true
