@@ -18,4 +18,10 @@ export class AdminController {
   summary() {
     return this.adminService.summary();
   }
+
+  @Get('dashboard')
+  @ApiOperation({ summary: 'Tableau de bord global d\'accueil (super admin)' })
+  dashboard() {
+    return this.adminService.dashboard();
+  }
 }

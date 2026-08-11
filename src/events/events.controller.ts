@@ -21,6 +21,7 @@ import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { PurchaseDto } from './dto/purchase.dto';
 import { ValidateTicketDto } from './dto/validate-ticket.dto';
+import { SetPresenceDto } from './dto/set-presence.dto';
 
 @ApiTags('Events')
 @Controller('events')
@@ -50,14 +51,27 @@ export class EventsController {
   @ApiQuery({ name: 'search', required: false })
   @ApiQuery({ name: 'status', required: false })
   @ApiQuery({ name: 'category', required: false })
+  @ApiQuery({ name: 'bdeId', required: false })
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false })
   async findForManagement(
     @CurrentUser() user: User,
     @Query('search') search?: string,
     @Query('status') status?: string,
     @Query('category') category?: string,
+    @Query('bdeId') bdeId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
     await this.eventsService.archivePastEvents();
-    return this.eventsService.findForManagement(user, { search, status, category });
+    return this.eventsService.findForManagement(user, {
+      search,
+      status,
+      category,
+      bdeId,
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
   }
 
   @Get(':id')
@@ -126,9 +140,9 @@ export class EventsController {
   @Get(':id/participants')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Participants publics d\'un événement (nom + avatar, profils publics seulement)' })
-  findParticipants(@Param('id') id: string) {
-    return this.eventsService.findPublicParticipants(id);
+  @ApiOperation({ summary: 'Participants d\'un événement (nom + avatar, membres du BDE seulement)' })
+  findParticipants(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.eventsService.findPublicParticipants(user, id);
   }
 
   @Get(':id/attendees')
@@ -151,5 +165,32 @@ export class EventsController {
     @Body() dto: ValidateTicketDto,
   ) {
     return this.eventsService.validateTicket(user, id, dto.qrCode);
+  }
+
+  @Patch(':id/attendees/:ticketId/presence')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN_BDE', 'SUPER_ADMIN')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Marquer un participant présent / absent (admin BDE)' })
+  setPresence(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Param('ticketId') ticketId: string,
+    @Body() dto: SetPresenceDto,
+  ) {
+    return this.eventsService.setAttendeePresence(user, id, ticketId, dto.present);
+  }
+
+  @Delete(':id/attendees/:ticketId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN_BDE', 'SUPER_ADMIN')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Retirer un participant d\'un événement (admin BDE)' })
+  removeAttendee(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Param('ticketId') ticketId: string,
+  ) {
+    return this.eventsService.removeAttendee(user, id, ticketId);
   }
 }

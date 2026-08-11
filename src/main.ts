@@ -26,6 +26,19 @@ function assertSecureConfig() {
         'Configurez un secret robuste dans .env avant de démarrer.',
     );
   }
+  // En production, exiger une liste blanche CORS explicite : sinon `origin: true`
+  // (ci-dessous) réfléchirait n'importe quelle origine avec `credentials: true`.
+  if (process.env.NODE_ENV === 'production') {
+    const origins = (process.env.ALLOWED_ORIGINS ?? '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    if (origins.length === 0) {
+      throw new Error(
+        'ALLOWED_ORIGINS doit lister au moins une origine autorisée en production (CORS).',
+      );
+    }
+  }
 }
 
 async function bootstrap() {

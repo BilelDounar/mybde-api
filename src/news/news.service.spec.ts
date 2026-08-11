@@ -1,4 +1,8 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { NewsService } from './news.service';
 
@@ -17,7 +21,7 @@ function createModelMock() {
 function createPrismaMock() {
   return {
     bDE: { findUnique: jest.fn() },
-    bdeMember: { findUnique: jest.fn() },
+    bdeMember: { findUnique: jest.fn(), findMany: jest.fn() },
   };
 }
 
@@ -30,6 +34,24 @@ describe('NewsService', () => {
     model = createModelMock();
     prisma = createPrismaMock();
     service = new NewsService(model as any, prisma as any);
+  });
+
+  describe('findAll (fil scopé aux BDE rejoints)', () => {
+    it('un membre de plusieurs BDE voit les actus de chacun d\'eux', async () => {
+      prisma.bdeMember.findMany.mockResolvedValue([{ bdeId: 'b1' }, { bdeId: 'b2' }]);
+      const exec = jest.fn().mockResolvedValue([]);
+      model.find.mockReturnValue({ sort: () => ({ exec }) });
+      await service.findAll(undefined, undefined, student);
+      const filter = model.find.mock.calls[0][0];
+      expect(filter.bdeId).toEqual({ $in: ['b1', 'b2'] });
+    });
+
+    it('sans adhésion : fil vide', async () => {
+      prisma.bdeMember.findMany.mockResolvedValue([]);
+      const res = await service.findAll(undefined, undefined, student);
+      expect(res).toEqual([]);
+      expect(model.find).not.toHaveBeenCalled();
+    });
   });
 
   describe('toggleLike', () => {
@@ -86,6 +108,14 @@ describe('NewsService', () => {
       expect(res.bdeSlug).toBe('club-tech');
       expect(res.bdeName).toBe('Club Tech');
       expect(res.content).toBe('Annonce');
+    });
+
+    it('refuse un contenu contenant des grossièretés (modération)', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', slug: 's', name: 'N' });
+      await expect(
+        service.create(superAdmin, { bdeId: 'b1', content: 'Espèce de conn4rd' } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(model.create).not.toHaveBeenCalled();
     });
   });
 });

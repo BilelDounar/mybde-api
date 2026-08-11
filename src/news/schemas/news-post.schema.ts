@@ -14,6 +14,11 @@ export class NewsPost {
   @Prop({ required: true })
   bdeName: string;
 
+  // Logo du BDE dénormalisé (comme bdeName/bdeSlug) : permet d'afficher l'avatar
+  // de l'auteur dans le fil sans jointure vers PostgreSQL à chaque lecture.
+  @Prop()
+  bdeLogo?: string;
+
   @Prop({ required: true })
   content: string;
 

@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  ConflictException,
+} from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -23,21 +28,38 @@ export class UsersService {
     return this.prisma.user.findMany({ select: USER_SELECT });
   }
 
-  /** Recherche d'utilisateurs (super admin) : nom / email, filtre par rôle. */
-  search(query: { search?: string; role?: string }) {
-    return this.prisma.user.findMany({
-      where: {
-        ...(query.role && { role: query.role as Role }),
-        ...(query.search && {
-          OR: [
-            { displayName: { contains: query.search, mode: 'insensitive' } },
-            { email: { contains: query.search, mode: 'insensitive' } },
-          ],
-        }),
-      },
-      select: USER_SELECT,
-      orderBy: { createdAt: 'desc' },
-    });
+  /**
+   * Recherche d'utilisateurs paginée (super admin). La recherche est
+   * multi-critères : nom, email et nom du BDE assigné. Filtre optionnel par rôle.
+   */
+  async search(query: { search?: string; role?: string; page?: number; limit?: number }) {
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(50, Math.max(1, query.limit ?? 10));
+    const where = {
+      ...(query.role && { role: query.role as Role }),
+      ...(query.search && {
+        OR: [
+          { displayName: { contains: query.search, mode: 'insensitive' as const } },
+          { email: { contains: query.search, mode: 'insensitive' as const } },
+          {
+            bdeMembers: {
+              some: { bde: { name: { contains: query.search, mode: 'insensitive' as const } } },
+            },
+          },
+        ],
+      }),
+    };
+    const [data, total] = await Promise.all([
+      this.prisma.user.findMany({
+        where,
+        select: USER_SELECT,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.user.count({ where }),
+    ]);
+    return { data, total, page, limit };
   }
 
   /** Change le rôle d'un utilisateur (super admin). Impossible sur soi-même. */
@@ -46,6 +68,15 @@ export class UsersService {
       throw new ForbiddenException('Vous ne pouvez pas modifier votre propre rôle');
     }
     await this.findOne(id);
+    // Modèle « admin dérivé » : le statut ADMIN_BDE s'obtient en étant promu
+    // admin dans un BDE. Repasser un utilisateur en ÉTUDIANT retire donc aussi
+    // tous ses mandats d'admin BDE, pour rester cohérent.
+    if (role === Role.STUDENT) {
+      await this.prisma.bdeMember.updateMany({
+        where: { userId: id, isAdmin: true },
+        data: { isAdmin: false },
+      });
+    }
     return this.prisma.user.update({
       where: { id },
       data: { role },
@@ -60,7 +91,7 @@ export class UsersService {
   }
 
   async update(id: string, data: Partial<{
-    displayName: string; phone: string; bio: string; profilePicture: string;
+    displayName: string; email: string; phone: string; bio: string; profilePicture: string;
     university: string; program: string; year: number;
     notificationsEnabled: boolean; emailNotifications: boolean;
     privacyLevel: 'PUBLIC' | 'PRIVATE';
@@ -68,6 +99,17 @@ export class UsersService {
     language: string;
   }>) {
     await this.findOne(id);
+    // L'email est unique : on refuse explicitement un email déjà pris par un
+    // autre compte (message clair plutôt qu'une erreur de contrainte Prisma).
+    if (data.email) {
+      const existing = await this.prisma.user.findUnique({
+        where: { email: data.email },
+        select: { id: true },
+      });
+      if (existing && existing.id !== id) {
+        throw new ConflictException('Cet email est déjà utilisé');
+      }
+    }
     return this.prisma.user.update({ where: { id }, data, select: USER_SELECT });
   }
 

@@ -175,6 +175,11 @@ export class AuthService {
         theme: true,
         language: true,
         createdAt: true,
+        // Aligné sur GET /users/me : le front s'appuie sur les adhésions
+        // (« Mes BDE », rôle admin dérivé) quel que soit l'endpoint « me » utilisé.
+        bdeMembers: {
+          select: { isAdmin: true, bde: { select: { id: true, name: true, logo: true } } },
+        },
       },
     });
   }

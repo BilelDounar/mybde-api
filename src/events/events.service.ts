@@ -39,25 +39,73 @@ export class EventsService {
    */
   async findForManagement(
     user: User,
-    query: { search?: string; status?: string; category?: string },
+    query: { search?: string; status?: string; category?: string; bdeId?: string; page?: number; limit?: number },
   ) {
     const managed = await this.managedBdeIds(user);
-    if (managed !== 'ALL' && managed.length === 0) return [];
-    return this.prisma.event.findMany({
-      where: {
-        ...(managed !== 'ALL' && { bdeId: { in: managed } }),
-        ...(query.status && { status: query.status as any }),
-        ...(query.category && { category: query.category as any }),
-        ...(query.search && {
-          OR: [
-            { title: { contains: query.search, mode: 'insensitive' } },
-            { location: { contains: query.search, mode: 'insensitive' } },
-          ],
-        }),
-      },
-      include: { bde: { select: { id: true, name: true, logo: true } }, ...TICKET_TIERS_INCLUDE },
-      orderBy: { date: 'desc' },
+    const page = Math.max(1, query.page ?? 1);
+    const limit = Math.min(50, Math.max(1, query.limit ?? 20));
+    if (managed !== 'ALL' && managed.length === 0) {
+      return { data: [], total: 0, page, limit };
+    }
+    // Un `bdeId` explicite scope la liste à ce seul BDE (vue « détail BDE » du
+    // super admin) — refusé s'il sort du périmètre d'un admin BDE.
+    if (query.bdeId && managed !== 'ALL' && !managed.includes(query.bdeId)) {
+      return { data: [], total: 0, page, limit };
+    }
+    const bdeFilter = query.bdeId
+      ? query.bdeId
+      : managed !== 'ALL'
+        ? { in: managed }
+        : undefined;
+    const where = {
+      ...(bdeFilter !== undefined && { bdeId: bdeFilter }),
+      ...(query.status && { status: query.status as any }),
+      ...(query.category && { category: query.category as any }),
+      ...(query.search && {
+        OR: [
+          { title: { contains: query.search, mode: 'insensitive' as const } },
+          { location: { contains: query.search, mode: 'insensitive' as const } },
+        ],
+      }),
+    };
+    const [data, total] = await Promise.all([
+      this.prisma.event.findMany({
+        where,
+        include: { bde: { select: { id: true, name: true, logo: true } }, ...TICKET_TIERS_INCLUDE },
+        orderBy: { date: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.event.count({ where }),
+    ]);
+    return { data, total, page, limit };
+  }
+
+  /**
+   * Règle stricte d'inscription : seul un étudiant **membre du BDE organisateur**
+   * peut s'inscrire / acheter un billet. Cela garantit qu'un compte présent sur
+   * la plateforme mais non rattaché au BDE n'apparaît jamais parmi ses inscrits,
+   * et qu'un administrateur (qui reçoit les fonds et est présent d'office) ne
+   * peut pas acheter de billet.
+   */
+  private async assertCanRegister(userId: string, bdeId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
     });
+    if (!user || user.role !== Role.STUDENT) {
+      throw new ForbiddenException(
+        "Seuls les étudiants peuvent s'inscrire aux événements",
+      );
+    }
+    const membership = await this.prisma.bdeMember.findUnique({
+      where: { userId_bdeId: { userId, bdeId } },
+    });
+    if (!membership) {
+      throw new ForbiddenException(
+        'Vous devez être membre du BDE organisateur pour vous inscrire',
+      );
+    }
   }
 
   /** Vérifie que l'utilisateur peut administrer le BDE donné. */
@@ -81,6 +129,10 @@ export class EventsService {
    * Un `bdeId` explicite (ex. page publique d'un BDE) ignore ce scoping.
    */
   async findAll(query: { category?: string; bdeId?: string; search?: string }, user?: User | null) {
+    // Bascule d'abord les événements publiés déjà passés en COMPLETED, pour ne
+    // jamais les servir comme « à venir » dans le fil (le filtre PUBLISHED
+    // ci-dessous les exclut alors naturellement).
+    await this.archivePastEvents();
     let memberBdeIds: string[] | undefined;
     if (!query.bdeId && user) {
       const memberships = await this.prisma.bdeMember.findMany({
@@ -123,6 +175,7 @@ export class EventsService {
 
   async register(userId: string, eventId: string) {
     const event = await this.findOne(eventId);
+    await this.assertCanRegister(userId, event.bdeId);
     if (event.currentAttendees >= event.capacity) {
       throw new BadRequestException('Événement complet');
     }
@@ -157,6 +210,7 @@ export class EventsService {
     paymentMethod: 'card' | 'balance' = 'card',
   ) {
     const event = await this.findOne(eventId);
+    await this.assertCanRegister(userId, event.bdeId);
     if (event.currentAttendees + quantity > event.capacity) {
       throw new BadRequestException('Places insuffisantes pour cet événement');
     }
@@ -343,12 +397,20 @@ export class EventsService {
   }
 
   /**
-   * Participants visibles publiquement pour un événement (tout utilisateur
-   * connecté). Contrairement à `findAttendees` (admin), ne renvoie que le nom
-   * et l'avatar des participants ayant un profil public, sans email ni billet.
+   * Participants visibles pour un événement. Contrairement à `findAttendees`
+   * (admin), ne renvoie que le nom et l'avatar des participants ayant un profil
+   * public, sans email ni billet. Visibilité stricte : réservé aux membres du
+   * BDE organisateur (et aux super admins) — un non-membre obtient une liste
+   * vide, afin de ne jamais exposer les inscrits d'un BDE que l'on n'a pas rejoint.
    */
-  async findPublicParticipants(eventId: string) {
-    await this.findOne(eventId);
+  async findPublicParticipants(user: User, eventId: string) {
+    const event = await this.findOne(eventId);
+    if (user.role !== Role.SUPER_ADMIN) {
+      const membership = await this.prisma.bdeMember.findUnique({
+        where: { userId_bdeId: { userId: user.id, bdeId: event.bdeId } },
+      });
+      if (!membership) return [];
+    }
     const tickets = await this.prisma.ticket.findMany({
       where: {
         eventId,
@@ -363,6 +425,79 @@ export class EventsService {
       },
     });
     return tickets.map((t) => t.user);
+  }
+
+  /**
+   * Marque manuellement la présence (USED) ou l'absence (VALID) d'un participant
+   * depuis la liste, sans passer par le scan QR (admin BDE / super admin).
+   */
+  async setAttendeePresence(
+    user: User,
+    eventId: string,
+    ticketId: string,
+    present: boolean,
+  ) {
+    const event = await this.findOne(eventId);
+    await this.assertCanManageBde(user, event.bdeId);
+
+    const ticket = await this.prisma.ticket.findFirst({ where: { id: ticketId, eventId } });
+    if (!ticket) throw new NotFoundException('Billet introuvable pour cet événement');
+    if (ticket.status === 'CANCELLED' || ticket.status === 'REFUNDED') {
+      throw new BadRequestException('Billet annulé : présence non modifiable');
+    }
+
+    return this.prisma.ticket.update({
+      where: { id: ticket.id },
+      data: { status: present ? 'USED' : 'VALID' },
+      include: { user: { select: { id: true, displayName: true, email: true, profilePicture: true } } },
+    });
+  }
+
+  /**
+   * Retire un participant d'un événement : son billet est annulé, la place
+   * libérée et, si le billet était payant, le montant est remboursé sur le
+   * solde de l'utilisateur (admin BDE / super admin).
+   */
+  async removeAttendee(user: User, eventId: string, ticketId: string) {
+    const event = await this.findOne(eventId);
+    await this.assertCanManageBde(user, event.bdeId);
+
+    const ticket = await this.prisma.ticket.findFirst({ where: { id: ticketId, eventId } });
+    if (!ticket) throw new NotFoundException('Billet introuvable pour cet événement');
+    if (ticket.status === 'CANCELLED' || ticket.status === 'REFUNDED') {
+      throw new BadRequestException('Billet déjà annulé');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      if (ticket.price > 0) {
+        await tx.user.update({
+          where: { id: ticket.userId },
+          data: { bdeCredits: { increment: ticket.price } },
+        });
+        // Reprise sur la trésorerie du BDE (bornée à 0) : la recette du billet
+        // avait crédité le BDE à l'achat, le remboursement la lui reprend.
+        const bde = await tx.bDE.findUnique({
+          where: { id: event.bdeId },
+          select: { balance: true },
+        });
+        const decrement = Math.min(ticket.price, bde?.balance ?? 0);
+        if (decrement > 0) {
+          await tx.bDE.update({
+            where: { id: event.bdeId },
+            data: { balance: { decrement } },
+          });
+        }
+      }
+      await tx.event.update({
+        where: { id: eventId },
+        data: { currentAttendees: { decrement: 1 } },
+      });
+      await tx.ticket.update({ where: { id: ticket.id }, data: { status: 'CANCELLED' } });
+      return {
+        message: 'Participant retiré',
+        refundedAmount: ticket.price > 0 ? ticket.price : 0,
+      };
+    });
   }
 
   /** Valide un billet par son QR code (admin BDE / super admin). */

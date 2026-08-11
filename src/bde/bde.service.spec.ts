@@ -27,6 +27,11 @@ function createPrismaMock() {
       upsert: jest.fn(),
       delete: jest.fn(),
       findMany: jest.fn(),
+      count: jest.fn(),
+    },
+    user: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
     },
     bdeWithdrawal: { findMany: jest.fn() },
     $transaction: jest.fn((arg: unknown) =>
@@ -71,6 +76,23 @@ describe('BdeService', () => {
       } as any);
       expect(res.slug).toBe('club-eco');
       expect(res.members.create).toEqual({ userId: 'admin', isAdmin: true });
+    });
+  });
+
+  describe('join (adhésion réservée aux étudiants)', () => {
+    it('autorise un étudiant', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.STUDENT });
+      prisma.bdeMember.upsert.mockResolvedValue({ id: 'm1' });
+      const res = await service.join('u1', 'b1');
+      expect(res).toEqual({ id: 'm1' });
+    });
+
+    it('refuse un admin BDE (un seul BDE autorisé)', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.ADMIN_BDE });
+      await expect(service.join('ba', 'b1')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.bdeMember.upsert).not.toHaveBeenCalled();
     });
   });
 
@@ -149,12 +171,111 @@ describe('BdeService', () => {
     });
   });
 
-  describe('removeMember', () => {
-    it('empêche de se retirer soi-même', async () => {
-      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', balance: 0 });
+  describe('removeMember (auto-retrait)', () => {
+    it('refuse à un admin BDE de se retirer s\'il est le dernier admin', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: true });
+      prisma.bdeMember.count.mockResolvedValue(0); // aucun autre admin
       await expect(
-        service.removeMember(superAdmin, 'b1', 'admin'),
+        service.removeMember(bdeAdmin, 'b1', 'ba'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.bdeMember.delete).not.toHaveBeenCalled();
+    });
+
+    it('autorise un admin BDE à se retirer s\'il reste un autre admin', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: true });
+      prisma.bdeMember.count.mockResolvedValue(1); // un autre admin présent
+      prisma.bdeMember.delete.mockResolvedValue({});
+      prisma.user.findUnique.mockResolvedValue({ role: Role.ADMIN_BDE });
+      const res = await service.removeMember(bdeAdmin, 'b1', 'ba');
+      expect(prisma.bdeMember.delete).toHaveBeenCalled();
+      expect(res.message).toBeDefined();
+    });
+  });
+
+  describe('assignMember (réservé aux étudiants)', () => {
+    it('refuse d\'ajouter un non-étudiant comme membre', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.ADMIN_BDE });
+      await expect(service.assignMember('b1', 'u1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(prisma.bdeMember.upsert).not.toHaveBeenCalled();
+    });
+
+    it('ajoute un étudiant', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.STUDENT });
+      prisma.bdeMember.upsert.mockResolvedValue({ id: 'm1' });
+      const res = await service.assignMember('b1', 'u1');
+      expect(res).toEqual({ id: 'm1' });
+    });
+  });
+
+  describe('getMembers', () => {
+    it('refuse un admin BDE qui n\'administre pas ce BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue(null);
+      await expect(service.getMembers(bdeAdmin, 'b1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    it('renvoie les membres pour un admin du BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: true });
+      prisma.bdeMember.findMany.mockResolvedValue([{ id: 'm1' }]);
+      const res = await service.getMembers(bdeAdmin, 'b1');
+      expect(res).toEqual([{ id: 'm1' }]);
+    });
+  });
+
+  describe('setMemberAdmin (synchronisation du rôle global)', () => {
+    it('promeut un membre en ADMIN_BDE global lorsqu\'il devient admin du BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: false });
+      prisma.bdeMember.update.mockResolvedValue({ id: 'm1' });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.STUDENT });
+      // 1er count = contrainte 1-BDE (aucun autre mandat), 2e count = sync (ce BDE).
+      prisma.bdeMember.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+      await service.setMemberAdmin(superAdmin, 'b1', 'u1', true);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' },
+        data: { role: Role.ADMIN_BDE },
+      });
+    });
+
+    it('refuse la promotion si l\'utilisateur administre déjà un autre BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: false });
+      prisma.bdeMember.count.mockResolvedValue(1); // déjà admin ailleurs
+      await expect(
+        service.setMemberAdmin(superAdmin, 'b1', 'u1', true),
       ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.bdeMember.update).not.toHaveBeenCalled();
+    });
+
+    it('rétrograde en STUDENT lorsqu\'il n\'administre plus aucun BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: true });
+      prisma.bdeMember.update.mockResolvedValue({ id: 'm1' });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.ADMIN_BDE });
+      prisma.bdeMember.count.mockResolvedValue(0);
+      await service.setMemberAdmin(superAdmin, 'b1', 'u1', false);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' },
+        data: { role: Role.STUDENT },
+      });
+    });
+
+    it('ne rétrograde jamais un super admin', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: true });
+      prisma.bdeMember.update.mockResolvedValue({ id: 'm1' });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.SUPER_ADMIN });
+      await service.setMemberAdmin(superAdmin, 'b1', 'u1', false);
+      expect(prisma.user.update).not.toHaveBeenCalled();
     });
   });
 });

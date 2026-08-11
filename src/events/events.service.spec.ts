@@ -9,10 +9,10 @@ import { EventsService } from './events.service';
 function createPrismaMock() {
   const tx = {
     order: { create: jest.fn() },
-    ticket: { create: jest.fn() },
+    ticket: { create: jest.fn(), update: jest.fn() },
     event: { update: jest.fn() },
     user: { findUnique: jest.fn(), update: jest.fn() },
-    bDE: { update: jest.fn() },
+    bDE: { findUnique: jest.fn(), update: jest.fn() },
   };
   return {
     tx,
@@ -20,11 +20,14 @@ function createPrismaMock() {
       findUnique: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       create: jest.fn(),
       delete: jest.fn(),
+      count: jest.fn().mockResolvedValue(0),
     },
-    ticket: { create: jest.fn() },
+    ticket: { create: jest.fn(), findFirst: jest.fn(), findMany: jest.fn() },
     bDE: { findUnique: jest.fn() },
+    user: { findUnique: jest.fn() },
     bdeMember: { findUnique: jest.fn(), findMany: jest.fn() },
     $transaction: jest.fn((arg: unknown) =>
       typeof arg === 'function'
@@ -46,12 +49,16 @@ describe('EventsService', () => {
     prisma = createPrismaMock();
     const geocoding = { geocode: jest.fn().mockResolvedValue(null) };
     service = new EventsService(prisma as any, geocoding as any);
+    // Acheteur valide par défaut (étudiant membre du BDE) pour register/purchase.
+    prisma.user.findUnique.mockResolvedValue({ role: Role.STUDENT });
+    prisma.bdeMember.findUnique.mockResolvedValue({ id: 'm1', isAdmin: false });
   });
 
   describe('register', () => {
     it('refuse si l\'événement est complet', async () => {
       prisma.event.findUnique.mockResolvedValue({
         id: 'e1',
+        bdeId: 'b1',
         capacity: 10,
         currentAttendees: 10,
         price: 0,
@@ -59,6 +66,19 @@ describe('EventsService', () => {
       await expect(service.register('u1', 'e1')).rejects.toBeInstanceOf(
         BadRequestException,
       );
+    });
+
+    it('refuse un non-étudiant (admin) de s\'inscrire', async () => {
+      prisma.event.findUnique.mockResolvedValue({ id: 'e1', bdeId: 'b1', capacity: 10, currentAttendees: 0, price: 0 });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.ADMIN_BDE });
+      await expect(service.register('a1', 'e1')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('refuse un étudiant non membre du BDE organisateur', async () => {
+      prisma.event.findUnique.mockResolvedValue({ id: 'e1', bdeId: 'b1', capacity: 10, currentAttendees: 0, price: 0 });
+      prisma.user.findUnique.mockResolvedValue({ role: Role.STUDENT });
+      prisma.bdeMember.findUnique.mockResolvedValue(null);
+      await expect(service.register('u1', 'e1')).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 
@@ -157,13 +177,40 @@ describe('EventsService', () => {
     });
   });
 
-  describe('findForManagement', () => {
-    it('super admin : pas de filtre bdeId, applique la recherche', async () => {
+  describe('findAll (fil scopé aux BDE rejoints)', () => {
+    it('un membre de plusieurs BDE voit les événements de chacun d\'eux', async () => {
+      prisma.bdeMember.findMany.mockResolvedValue([{ bdeId: 'b1' }, { bdeId: 'b2' }, { bdeId: 'b3' }]);
       prisma.event.findMany.mockResolvedValue([]);
-      await service.findForManagement(superAdmin, { search: 'gala' });
+      await service.findAll({}, student);
+      const arg = prisma.event.findMany.mock.calls[0][0];
+      expect(arg.where.bdeId).toEqual({ in: ['b1', 'b2', 'b3'] });
+    });
+
+    it('sans adhésion : fil vide, aucune requête événements', async () => {
+      prisma.bdeMember.findMany.mockResolvedValue([]);
+      const res = await service.findAll({}, student);
+      expect(res).toEqual([]);
+      expect(prisma.event.findMany).not.toHaveBeenCalled();
+    });
+
+    it('un bdeId explicite ignore le scoping (page publique d\'un BDE)', async () => {
+      prisma.event.findMany.mockResolvedValue([]);
+      await service.findAll({ bdeId: 'bX' }, student);
+      const arg = prisma.event.findMany.mock.calls[0][0];
+      expect(arg.where.bdeId).toBe('bX');
+      expect(prisma.bdeMember.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findForManagement', () => {
+    it('super admin : pas de filtre bdeId, applique la recherche, réponse paginée', async () => {
+      prisma.event.findMany.mockResolvedValue([{ id: 'e1' }]);
+      prisma.event.count.mockResolvedValue(1);
+      const res = await service.findForManagement(superAdmin, { search: 'gala' });
       const arg = prisma.event.findMany.mock.calls[0][0];
       expect(arg.where.bdeId).toBeUndefined();
       expect(arg.where.OR).toBeDefined();
+      expect(res).toEqual({ data: [{ id: 'e1' }], total: 1, page: 1, limit: 20 });
     });
 
     it('admin BDE : limite aux BDE administrés', async () => {
@@ -174,10 +221,10 @@ describe('EventsService', () => {
       expect(arg.where.bdeId).toEqual({ in: ['b1'] });
     });
 
-    it('admin BDE sans BDE administré : renvoie une liste vide', async () => {
+    it('admin BDE sans BDE administré : réponse vide sans requête', async () => {
       prisma.bdeMember.findMany.mockResolvedValue([]);
       const res = await service.findForManagement(bdeAdmin, {});
-      expect(res).toEqual([]);
+      expect(res).toEqual({ data: [], total: 0, page: 1, limit: 20 });
       expect(prisma.event.findMany).not.toHaveBeenCalled();
     });
   });
@@ -266,6 +313,50 @@ describe('EventsService', () => {
       await expect(
         service.update(superAdmin, 'e1', { capacity: 3 } as any),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('findPublicParticipants (visibilité stricte)', () => {
+    it('renvoie une liste vide pour un non-membre du BDE', async () => {
+      prisma.event.findUnique.mockResolvedValue({ id: 'e1', bdeId: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue(null);
+      const res = await service.findPublicParticipants(student, 'e1');
+      expect(res).toEqual([]);
+      expect(prisma.ticket.findMany).not.toHaveBeenCalled();
+    });
+
+    it('renvoie les participants pour un membre du BDE', async () => {
+      prisma.event.findUnique.mockResolvedValue({ id: 'e1', bdeId: 'b1' });
+      prisma.bdeMember.findUnique.mockResolvedValue({ id: 'm1' });
+      prisma.ticket.findMany.mockResolvedValue([{ user: { id: 'u1', displayName: 'A' } }]);
+      const res = await service.findPublicParticipants(student, 'e1');
+      expect(res).toEqual([{ id: 'u1', displayName: 'A' }]);
+    });
+
+    it('un super admin voit les participants sans être membre', async () => {
+      prisma.event.findUnique.mockResolvedValue({ id: 'e1', bdeId: 'b1' });
+      prisma.ticket.findMany.mockResolvedValue([{ user: { id: 'u1' } }]);
+      const res = await service.findPublicParticipants(superAdmin, 'e1');
+      expect(res).toEqual([{ id: 'u1' }]);
+      expect(prisma.bdeMember.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('removeAttendee (remboursement)', () => {
+    it('rembourse l\'utilisateur et reprend la recette sur la trésorerie du BDE', async () => {
+      prisma.event.findUnique.mockResolvedValue({ id: 'e1', bdeId: 'b1' });
+      prisma.ticket.findFirst.mockResolvedValue({ id: 't1', userId: 'u1', price: 10, status: 'VALID' });
+      prisma.tx.bDE.findUnique.mockResolvedValue({ balance: 100 });
+      const res: any = await service.removeAttendee(superAdmin, 'e1', 't1');
+      expect(prisma.tx.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' },
+        data: { bdeCredits: { increment: 10 } },
+      });
+      expect(prisma.tx.bDE.update).toHaveBeenCalledWith({
+        where: { id: 'b1' },
+        data: { balance: { decrement: 10 } },
+      });
+      expect(res.refundedAmount).toBe(10);
     });
   });
 });

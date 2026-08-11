@@ -48,9 +48,12 @@ export class BdeController {
   }
 
   @Get(':id/members')
-  @ApiOperation({ summary: 'Membres d\'un BDE' })
-  getMembers(@Param('id') id: string) {
-    return this.bdeService.getMembers(id);
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN_BDE', 'SUPER_ADMIN')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Membres d\'un BDE (admin du BDE ou super admin)' })
+  getMembers(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.bdeService.getMembers(user, id);
   }
 
   @Post()

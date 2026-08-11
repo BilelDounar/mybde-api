@@ -53,6 +53,28 @@ export class BdeService {
     }
   }
 
+  /**
+   * Recale le rôle global d'un utilisateur sur ses adhésions : il devient
+   * ADMIN_BDE dès qu'il administre au moins un BDE, et retombe STUDENT sinon.
+   * Un SUPER_ADMIN n'est jamais rétrogradé. Sans cette synchronisation, un membre
+   * promu admin d'un BDE resterait bloqué par le RolesGuard (rôle global STUDENT)
+   * et ne pourrait rien gérer.
+   */
+  private async syncManagerRole(userId: string) {
+    const target = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (!target || target.role === Role.SUPER_ADMIN) return;
+    const adminMemberships = await this.prisma.bdeMember.count({
+      where: { userId, isAdmin: true },
+    });
+    const nextRole = adminMemberships > 0 ? Role.ADMIN_BDE : Role.STUDENT;
+    if (target.role !== nextRole) {
+      await this.prisma.user.update({ where: { id: userId }, data: { role: nextRole } });
+    }
+  }
+
   findAll() {
     return this.prisma.bDE.findMany({
       where: { status: 'ACTIVE' },
@@ -105,6 +127,19 @@ export class BdeService {
     const bde = await this.prisma.bDE.findUnique({ where: { id: bdeId } });
     if (!bde) throw new NotFoundException('BDE introuvable');
 
+    // Seuls les utilisateurs classiques rejoignent des BDE. Un admin BDE
+    // n'administre qu'un seul BDE et un super admin les gère tous : ni l'un ni
+    // l'autre ne rejoint de BDE supplémentaire.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (user && user.role !== Role.STUDENT) {
+      throw new ForbiddenException(
+        'Seuls les utilisateurs classiques peuvent rejoindre un BDE',
+      );
+    }
+
     return this.prisma.bdeMember.upsert({
       where: { userId_bdeId: { userId, bdeId } },
       update: {},
@@ -152,6 +187,19 @@ export class BdeService {
             where: { id: userId },
             data: { bdeCredits: { increment: ticket.price } },
           });
+          // Reprise sur la trésorerie du BDE (bornée à 0) : le remboursement
+          // rend l'avoir à l'utilisateur et reprend la recette au BDE.
+          const bde = await tx.bDE.findUnique({
+            where: { id: bdeId },
+            select: { balance: true },
+          });
+          const decrement = Math.min(ticket.price, bde?.balance ?? 0);
+          if (decrement > 0) {
+            await tx.bDE.update({
+              where: { id: bdeId },
+              data: { balance: { decrement } },
+            });
+          }
         }
         await tx.event.update({
           where: { id: ticket.eventId },
@@ -179,6 +227,20 @@ export class BdeService {
   /** Assigne un utilisateur à un BDE (super admin) — idempotent. */
   async assignMember(bdeId: string, userId: string) {
     await this.findOne(bdeId);
+    // Cohérence avec `join` : seuls les utilisateurs classiques sont membres
+    // d'un BDE. Un admin BDE (dérivé d'une adhésion admin) ou un super admin ne
+    // doit pas être ajouté comme simple membre. Pour rendre quelqu'un admin, on
+    // l'assigne d'abord (en tant qu'étudiant) puis on le promeut (setMemberAdmin).
+    const target = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (!target) throw new NotFoundException('Utilisateur introuvable');
+    if (target.role !== Role.STUDENT) {
+      throw new ForbiddenException(
+        'Seuls les utilisateurs classiques peuvent être ajoutés comme membres',
+      );
+    }
     return this.prisma.bdeMember.upsert({
       where: { userId_bdeId: { userId, bdeId } },
       update: {},
@@ -187,10 +249,16 @@ export class BdeService {
     });
   }
 
-  getMembers(bdeId: string) {
+  /** Membres d'un BDE — réservé à un admin de ce BDE (ou super admin). */
+  async getMembers(user: User, bdeId: string) {
+    await this.findOne(bdeId);
+    await this.assertCanManage(user, bdeId);
     return this.prisma.bdeMember.findMany({
       where: { bdeId },
-      include: { user: { select: { id: true, displayName: true, profilePicture: true } } },
+      include: {
+        user: { select: { id: true, displayName: true, email: true, profilePicture: true } },
+      },
+      orderBy: [{ isAdmin: 'desc' }, { joinedAt: 'asc' }],
     });
   }
 
@@ -249,27 +317,53 @@ export class BdeService {
       where: { userId_bdeId: { userId: targetUserId, bdeId } },
     });
     if (!membership) throw new NotFoundException('Membre introuvable');
-    return this.prisma.bdeMember.update({
+    // Contrainte : un admin BDE n'administre qu'un seul BDE à la fois.
+    if (isAdmin && !membership.isAdmin) {
+      const otherAdminMandates = await this.prisma.bdeMember.count({
+        where: { userId: targetUserId, isAdmin: true, bdeId: { not: bdeId } },
+      });
+      if (otherAdminMandates > 0) {
+        throw new BadRequestException(
+          'Cet utilisateur administre déjà un autre BDE (un admin ne peut gérer qu\'un seul BDE)',
+        );
+      }
+    }
+    const updated = await this.prisma.bdeMember.update({
       where: { userId_bdeId: { userId: targetUserId, bdeId } },
       data: { isAdmin },
-      include: { user: { select: { id: true, displayName: true, profilePicture: true } } },
+      include: { user: { select: { id: true, displayName: true, email: true, profilePicture: true } } },
     });
+    // Aligne le rôle global sur la nouvelle situation (promotion/rétrogradation).
+    await this.syncManagerRole(targetUserId);
+    return updated;
   }
 
   /** Retirer un membre du BDE (admin du BDE ou super admin). */
   async removeMember(user: User, bdeId: string, targetUserId: string) {
     await this.findOne(bdeId);
     await this.assertCanManage(user, bdeId);
-    if (targetUserId === user.id) {
-      throw new BadRequestException('Vous ne pouvez pas vous retirer vous-même');
-    }
     const membership = await this.prisma.bdeMember.findUnique({
       where: { userId_bdeId: { userId: targetUserId, bdeId } },
     });
     if (!membership) throw new NotFoundException('Membre introuvable');
+    // Auto-retrait d'un admin BDE : autorisé uniquement s'il reste un autre admin
+    // dans le BDE, pour ne jamais laisser le BDE sans administrateur. Un super
+    // admin (qui n'administre pas via une adhésion) n'est pas concerné.
+    if (targetUserId === user.id && user.role !== Role.SUPER_ADMIN) {
+      const otherAdmins = await this.prisma.bdeMember.count({
+        where: { bdeId, isAdmin: true, userId: { not: user.id } },
+      });
+      if (otherAdmins === 0) {
+        throw new ForbiddenException(
+          'Vous êtes le dernier administrateur de ce BDE : promouvez un autre membre avant de vous retirer',
+        );
+      }
+    }
     await this.prisma.bdeMember.delete({
       where: { userId_bdeId: { userId: targetUserId, bdeId } },
     });
+    // Le membre retiré perd peut-être son dernier mandat d'admin : recale son rôle.
+    await this.syncManagerRole(targetUserId);
     return { message: 'Membre retiré' };
   }
 

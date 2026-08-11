@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -10,6 +11,7 @@ import { NewsPost, NewsPostDocument } from './schemas/news-post.schema';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateNewsDto } from './dto/create-news.dto';
 import { UpdateNewsDto } from './dto/update-news.dto';
+import { detectProfanity } from '../common/profanity';
 
 @Injectable()
 export class NewsService {
@@ -18,6 +20,20 @@ export class NewsService {
     private readonly newsPostModel: Model<NewsPostDocument>,
     private readonly prisma: PrismaService,
   ) { }
+
+  /**
+   * Premier niveau de modération : refuse la publication si le contenu comporte
+   * des grossièretés. Le message signale les termes détectés à l'auteur.
+   */
+  private assertClean(content?: string) {
+    if (!content) return;
+    const found = detectProfanity(content);
+    if (found.length > 0) {
+      throw new BadRequestException(
+        `Contenu inapproprié détecté (${found.join(', ')}). Merci de reformuler.`,
+      );
+    }
+  }
 
   private async assertCanManageBde(user: User, bdeId: string) {
     if (user.role === Role.SUPER_ADMIN) return;
@@ -89,11 +105,13 @@ export class NewsService {
     const bde = await this.prisma.bDE.findUnique({ where: { id: dto.bdeId } });
     if (!bde) throw new NotFoundException('BDE introuvable');
     await this.assertCanManageBde(user, dto.bdeId);
+    this.assertClean(dto.content);
 
     return this.newsPostModel.create({
       bdeId: bde.id,
       bdeSlug: bde.slug,
       bdeName: bde.name,
+      bdeLogo: bde.logo ?? undefined,
       content: dto.content,
       image: dto.image,
       likedByUserIds: [],
@@ -104,6 +122,7 @@ export class NewsService {
   async update(user: User, id: string, dto: UpdateNewsDto) {
     const post = await this.findOne(id);
     await this.assertCanManageBde(user, post.bdeId);
+    this.assertClean(dto.content);
     const updated = await this.newsPostModel
       .findByIdAndUpdate(id, { $set: dto }, { new: true })
       .exec();
