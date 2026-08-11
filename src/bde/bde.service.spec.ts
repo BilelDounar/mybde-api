@@ -31,6 +31,7 @@ function createPrismaMock() {
     },
     user: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     bdeWithdrawal: { findMany: jest.fn() },
@@ -75,7 +76,90 @@ describe('BdeService', () => {
         university: 'U',
       } as any);
       expect(res.slug).toBe('club-eco');
-      expect(res.members.create).toEqual({ userId: 'admin', isAdmin: true });
+      expect(res.members.create).toEqual([{ userId: 'admin', isAdmin: true }]);
+    });
+
+    it('désigne les administrateurs fournis et aligne leur rôle global', async () => {
+      prisma.bDE.findUnique.mockResolvedValue(null);
+      prisma.user.findMany.mockResolvedValue([{ id: 'u1' }, { id: 'u2' }]);
+      prisma.bdeMember.findMany.mockResolvedValue([]);
+      prisma.bDE.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'b1', ...data }),
+      );
+      // syncManagerRole : chaque désigné est étudiant avec un mandat admin.
+      prisma.user.findUnique.mockResolvedValue({ role: Role.STUDENT });
+      prisma.bdeMember.count.mockResolvedValue(1);
+
+      const res: any = await service.create(superAdmin, {
+        name: 'Club Photo',
+        university: 'U',
+        adminUserIds: ['u1', 'u2'],
+      } as any);
+
+      expect(res.members.create).toEqual([
+        { userId: 'admin', isAdmin: true },
+        { userId: 'u1', isAdmin: true },
+        { userId: 'u2', isAdmin: true },
+      ]);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' },
+        data: { role: Role.ADMIN_BDE },
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u2' },
+        data: { role: Role.ADMIN_BDE },
+      });
+    });
+
+    it('dédoublonne et ignore le créateur dans les admins désignés', async () => {
+      prisma.bDE.findUnique.mockResolvedValue(null);
+      prisma.user.findMany.mockResolvedValue([{ id: 'u1' }]);
+      prisma.bdeMember.findMany.mockResolvedValue([]);
+      prisma.bDE.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'b1', ...data }),
+      );
+      prisma.user.findUnique.mockResolvedValue({ role: Role.STUDENT });
+      prisma.bdeMember.count.mockResolvedValue(1);
+
+      const res: any = await service.create(superAdmin, {
+        name: 'Club Ciné',
+        university: 'U',
+        adminUserIds: ['u1', 'u1', 'admin'],
+      } as any);
+
+      expect(res.members.create).toEqual([
+        { userId: 'admin', isAdmin: true },
+        { userId: 'u1', isAdmin: true },
+      ]);
+    });
+
+    it('refuse un administrateur introuvable', async () => {
+      prisma.bDE.findUnique.mockResolvedValue(null);
+      prisma.user.findMany.mockResolvedValue([{ id: 'u1' }]);
+      await expect(
+        service.create(superAdmin, {
+          name: 'Club Jeux',
+          university: 'U',
+          adminUserIds: ['u1', 'fantome'],
+        } as any),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.bDE.create).not.toHaveBeenCalled();
+    });
+
+    it('refuse un administrateur qui gère déjà un autre BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue(null);
+      prisma.user.findMany.mockResolvedValue([{ id: 'u1' }]);
+      prisma.bdeMember.findMany.mockResolvedValue([
+        { user: { displayName: 'Hugo Bernard' } },
+      ]);
+      await expect(
+        service.create(superAdmin, {
+          name: 'Club Danse',
+          university: 'U',
+          adminUserIds: ['u1'],
+        } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.bDE.create).not.toHaveBeenCalled();
     });
   });
 

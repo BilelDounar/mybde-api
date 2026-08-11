@@ -267,9 +267,17 @@ export class BdeService {
     const slug = dto.slug ? slugify(dto.slug) : slugify(dto.name);
     const existing = await this.prisma.bDE.findUnique({ where: { slug } });
     if (existing) throw new ConflictException('Un BDE avec ce slug existe déjà');
+
+    // Administrateurs désignés à la création. Le créateur est déjà membre admin
+    // ci-dessous : l'exclure évite une adhésion en double.
+    const adminUserIds = [...new Set(dto.adminUserIds ?? [])].filter(
+      (id) => id !== user.id,
+    );
+    await this.assertAssignableAsAdmins(adminUserIds);
+
     const joinCode = await this.generateJoinCode();
 
-    return this.prisma.bDE.create({
+    const bde = await this.prisma.bDE.create({
       data: {
         name: dto.name,
         slug,
@@ -278,9 +286,51 @@ export class BdeService {
         university: dto.university,
         status: dto.status ?? 'ACTIVE',
         joinCode,
-        members: { create: { userId: user.id, isAdmin: true } },
+        members: {
+          create: [
+            { userId: user.id, isAdmin: true },
+            ...adminUserIds.map((userId) => ({ userId, isAdmin: true })),
+          ],
+        },
       },
     });
+
+    // Aligne le rôle global des administrateurs désignés (STUDENT -> ADMIN_BDE).
+    for (const userId of adminUserIds) {
+      await this.syncManagerRole(userId);
+    }
+
+    return bde;
+  }
+
+  /**
+   * Vérifie que chaque utilisateur peut recevoir un mandat d'administrateur :
+   * il doit exister et n'administrer aucun autre BDE (même règle que
+   * `setMemberAdmin`, un admin ne gère qu'un seul BDE à la fois).
+   */
+  private async assertAssignableAsAdmins(userIds: string[]) {
+    if (userIds.length === 0) return;
+
+    const found = await this.prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true },
+    });
+    if (found.length !== userIds.length) {
+      throw new NotFoundException(
+        'Un des utilisateurs désignés comme administrateur est introuvable',
+      );
+    }
+
+    const alreadyAdmin = await this.prisma.bdeMember.findMany({
+      where: { userId: { in: userIds }, isAdmin: true },
+      select: { user: { select: { displayName: true } } },
+    });
+    if (alreadyAdmin.length > 0) {
+      const names = alreadyAdmin.map((m) => m.user.displayName).join(', ');
+      throw new BadRequestException(
+        `${names} administre déjà un autre BDE (un admin ne peut gérer qu'un seul BDE)`,
+      );
+    }
   }
 
   async update(user: User, id: string, dto: UpdateBdeDto) {

@@ -1,4 +1,11 @@
-import { IsString, IsNotEmpty, IsOptional, IsEnum } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  IsEnum,
+  IsArray,
+  ArrayUnique,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { BdeStatus } from '@prisma/client';
 
@@ -32,4 +39,16 @@ export class CreateBdeDto {
   @IsOptional()
   @IsEnum(BdeStatus)
   status?: BdeStatus;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Utilisateurs à désigner administrateurs du BDE dès sa création. ' +
+      'Ils sont ajoutés comme membres admin et passent au rôle ADMIN_BDE.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  adminUserIds?: string[];
 }
