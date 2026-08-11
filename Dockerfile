@@ -43,7 +43,7 @@ COPY --from=build /app/prisma ./prisma
 
 EXPOSE 3000
 
-# Applique les migrations puis démarre l'API.
-# (npx prisma migrate deploy nécessite le paquet prisma ; sur Coolify, on peut
-#  aussi lancer les migrations dans une commande de déploiement dédiée.)
-CMD ["node", "dist/main.js"]
+# Applique les migrations en attente puis démarre l'API.
+# Si une migration échoue, le conteneur s'arrête : le déploiement échoue
+# franchement plutôt que de servir une API sur un schéma incomplet.
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main.js"]
