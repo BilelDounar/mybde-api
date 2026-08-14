@@ -92,7 +92,52 @@ npm run start:dev
 | GET | `/news` | ❌ | Fil d'actus (`?bdeId=`) |
 | POST | `/news/:id/like` | ✅ | Like / Unlike |
 
+### Administration d'un BDE
+
+| Méthode | Route | Rôle | Description |
+|---|---|---|---|
+| GET | `/bde/mine` | Admin BDE, Super Admin | BDE que j'administre |
+| POST | `/bde` | Super Admin | Créer un BDE (`adminUserIds` désigne ses admins) |
+| PATCH | `/bde/:id` | Admin du BDE, Super Admin | Modifier les informations |
+| DELETE | `/bde/:id` | Super Admin | Supprimer un BDE |
+| GET | `/bde/:id/members` | Admin du BDE, Super Admin | Membres |
+| PATCH | `/bde/:id/members/:userId` | Admin du BDE, Super Admin | Promouvoir / rétrograder |
+| POST | `/bde/:id/join-code/regenerate` | Admin du BDE, Super Admin | Nouveau code d'invitation |
+| GET | `/bde/:id/withdrawals` | Admin du BDE, Super Admin | Historique des retraits |
+| POST | `/bde/:id/withdraw` | **Admin du BDE uniquement** | Retirer la trésorerie |
+
 **Documentation Swagger** : [http://localhost:3000/api/docs](http://localhost:3000/api/docs)
+
+---
+
+## Rôles et permissions
+
+Trois rôles globaux (`STUDENT`, `ADMIN_BDE`, `SUPER_ADMIN`), portés par le
+compte et relus depuis la base à chaque requête — une promotion prend donc effet
+sans reconnexion.
+
+Le rôle global ouvre l'accès à la route (`RolesGuard`), mais l'autorisation fine
+se joue dans le service : `assertCanManage` exige un **mandat d'administrateur
+dans le BDE visé**, et laisse passer un `SUPER_ADMIN` sans condition.
+
+Le rôle global est par ailleurs recalé automatiquement sur les adhésions
+(`syncManagerRole`) : un membre promu administrateur d'un BDE devient
+`ADMIN_BDE`, et retombe `STUDENT` quand il perd son dernier mandat. Un
+`SUPER_ADMIN` n'est jamais rétrogradé.
+
+### L'exception : le retrait de trésorerie
+
+`POST /bde/:id/withdraw` est la **seule** opération d'administration fermée au
+super admin par son seul rôle. Cet argent provient des ventes de billets et
+appartient à l'association : l'opérateur de la plateforme le consulte
+(supervision) mais n'a pas à le déplacer.
+
+Le retrait exige un mandat d'administrateur dans ce BDE précis. Un super admin
+qui est aussi membre administrateur du BDE reste donc autorisé — c'est son
+association, pas un privilège de plateforme.
+
+Retraits par paliers de 20 €, commission MyBDE de 5 % prélevée sur le brut
+(`WITHDRAWAL_STEP` et `WITHDRAWAL_FEE_RATE` dans `bde.service.ts`).
 
 ---
 
