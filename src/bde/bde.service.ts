@@ -421,10 +421,23 @@ export class BdeService {
    * Retrait de la trésorerie du BDE, par paliers de 20 €. Une commission MyBDE
    * (modèle économique) est prélevée : le BDE reçoit le montant net. Le solde du
    * BDE est débité du montant brut et le retrait est journalisé.
+   *
+   * Contrairement aux autres opérations d'administration, le retrait n'est PAS
+   * ouvert au super admin du seul fait de son rôle : cet argent appartient à
+   * l'association, l'opérateur de la plateforme n'a pas à le déplacer. Il faut
+   * un mandat d'administrateur *dans ce BDE* (un super admin qui est aussi
+   * membre admin du BDE reste donc autorisé).
    */
   async withdraw(user: User, bdeId: string, amount: number) {
     const bde = await this.findOne(bdeId);
-    await this.assertCanManage(user, bdeId);
+    const membership = await this.prisma.bdeMember.findUnique({
+      where: { userId_bdeId: { userId: user.id, bdeId } },
+    });
+    if (!membership?.isAdmin) {
+      throw new ForbiddenException(
+        'Le retrait de la trésorerie est réservé aux administrateurs de ce BDE',
+      );
+    }
 
     if (amount <= 0 || amount % WITHDRAWAL_STEP !== 0) {
       throw new BadRequestException(

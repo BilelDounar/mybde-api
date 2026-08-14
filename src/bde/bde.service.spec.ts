@@ -223,27 +223,51 @@ describe('BdeService', () => {
   });
 
   describe('withdraw', () => {
+    /** Mandat d'administrateur dans le BDE ciblé. */
+    const asBdeAdmin = () =>
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: true });
+
+    it("refuse un super admin qui n'administre pas ce BDE", async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', balance: 100 });
+      prisma.bdeMember.findUnique.mockResolvedValue(null);
+      await expect(service.withdraw(superAdmin, 'b1', 40)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('refuse un membre simple (non admin) du BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', balance: 100 });
+      prisma.bdeMember.findUnique.mockResolvedValue({ isAdmin: false });
+      await expect(service.withdraw(bdeAdmin, 'b1', 40)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
     it('refuse un montant non multiple de 20', async () => {
       prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', balance: 100 });
-      await expect(service.withdraw(superAdmin, 'b1', 30)).rejects.toBeInstanceOf(
+      asBdeAdmin();
+      await expect(service.withdraw(bdeAdmin, 'b1', 30)).rejects.toBeInstanceOf(
         BadRequestException,
       );
     });
 
     it('refuse si le solde du BDE est insuffisant', async () => {
       prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', balance: 10 });
-      await expect(service.withdraw(superAdmin, 'b1', 20)).rejects.toBeInstanceOf(
+      asBdeAdmin();
+      await expect(service.withdraw(bdeAdmin, 'b1', 20)).rejects.toBeInstanceOf(
         BadRequestException,
       );
     });
 
     it('prélève la commission (5%) et débite le solde brut', async () => {
       prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', balance: 100 });
+      asBdeAdmin();
       prisma.tx.bDE.update.mockResolvedValue({ balance: 60 });
       prisma.tx.bdeWithdrawal.create.mockImplementation(({ data }: any) =>
         Promise.resolve({ id: 'w1', ...data }),
       );
-      const res: any = await service.withdraw(superAdmin, 'b1', 40);
+      const res: any = await service.withdraw(bdeAdmin, 'b1', 40);
       expect(res.fee).toBe(2); // 40 * 5%
       expect(res.netAmount).toBe(38);
       expect(res.balance).toBe(60);
@@ -252,6 +276,17 @@ describe('BdeService', () => {
         data: { balance: { decrement: 40 } },
         select: { balance: true },
       });
+    });
+
+    it('autorise un super admin qui administre aussi ce BDE', async () => {
+      prisma.bDE.findUnique.mockResolvedValue({ id: 'b1', balance: 100 });
+      asBdeAdmin();
+      prisma.tx.bDE.update.mockResolvedValue({ balance: 80 });
+      prisma.tx.bdeWithdrawal.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'w1', ...data }),
+      );
+      const res: any = await service.withdraw(superAdmin, 'b1', 20);
+      expect(res.netAmount).toBe(19);
     });
   });
 
